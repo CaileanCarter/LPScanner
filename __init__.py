@@ -1,1 +1,1 @@
-from LPScanner import LPScanner, JobHandler
+from .LPScanner import LPScanner, JobHandler #lgtm [py/unused-import]
