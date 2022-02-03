@@ -1,12 +1,40 @@
 import weakref
+import re
 from threading import Thread
-from collections import deque
+from collections import deque, namedtuple
 
 import numpy as np
-import pandas as pd
-import plotly.express as px
+# import pandas as pd
+# import plotly.express as px
 
 from ScrumPy.LP.glpks import exec_ll
+
+CMDs = {
+    "SCAN" : "reac",
+    "FROM" : "start",
+    "TO" : "stop",
+    "STEP" : "step",
+    "ID" : "ID"
+}
+
+NAME = r"(?P<NAME>[\w|\-|_]{5,})"
+ACTION = r"(?P<ACTION>[A-Z]{2,4})"
+NUM = r"(?P<NUM>[-+]?\d*\.?\d+)"
+WS = r"(?P<WS>\s+)"
+
+master_pattern = re.compile('|'.join([NAME, ACTION, NUM, WS]))
+Token = namedtuple('Token', ['type', 'value'])
+
+def parse_tokens(msg: str):
+    scanner = master_pattern.scanner(msg)
+    results = [Token(m.lastgroup, m.group()) for m in iter(scanner.match, None)]
+    fil_result = list(filter(lambda x: x.type != 'WS', results)) 
+
+    for i in range(0, len(fil_result)-1, 2):
+        action, val = fil_result[i:i+2]
+        assert action.type == "ACTION"
+        assert val.type in ('NAME', 'NUM')
+        yield action.value, val.value
 
 
 def _new_instance(obj):
@@ -168,8 +196,8 @@ class JobHandler:
         self._t.start()
 
 
-    def submit(self, *args, ID="", notes="", **kwargs):
-        lpscan = LPScanner(*args, **kwargs)
+    def submit(self, reac, ID="", notes="", **kwargs):
+        lpscan = LPScanner(reac, **kwargs)
 
         if ID:
             lpscan.ID = ID 
@@ -181,7 +209,28 @@ class JobHandler:
         self._jobs.append((ID, lpscan))
 
 
-    def token_submit(self, token):
+    def token_submit(self, msg: str, flux={}):
         # perhaps introduce a tokenised input?
-        # SCAN [reaction] FROM [min] TO [max] STEP [step] WITH [reversability]
-        pass
+        # SCAN [reaction] FROM [min] TO [max] STEP [step]
+
+        form = {
+            "notes" : "String input",
+            "flux" : flux
+            }
+        reac = None
+
+        for action, val in parse_tokens(msg):
+
+            if action == "SCAN":
+                reac = val
+            elif action == "ID":
+                form["ID"] = val
+            else:
+                val = float(val)
+                if val < 0:
+                    val = -val
+                    form["rev"] = True
+                act = CMDs[action]
+                form[act] = val
+
+        self.submit(reac, **form)
