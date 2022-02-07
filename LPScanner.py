@@ -2,6 +2,7 @@ import weakref
 import re
 from threading import Thread
 from collections import deque, namedtuple
+from typing import Tuple
 
 import numpy as np
 # import pandas as pd
@@ -9,21 +10,26 @@ import numpy as np
 
 from ScrumPy.LP.glpks import exec_ll
 
-CMDs = {
-    "SCAN" : "reac",
-    "FROM" : "start",
-    "TO" : "stop",
-    "STEP" : "step",
-    "ID" : "ID"
-}
 
-NAME = r"(?P<NAME>[\w|\-|_]{5,})"
-ACTION = r"(?P<ACTION>[A-Z]{2,4})"
-NUM = r"(?P<NUM>[-+]?\d*\.?\d+)"
-WS = r"(?P<WS>\s+)"
+#---------------------------------------------
+# Handling tokenised input
+
+CMDs = {
+    "SCAN" :    "reac",
+    "FROM" :    "start",
+    "TO" :      "stop",
+    "STEP" :    "step",
+    "ID" :      "ID"
+    }
+
+NAME =      r"(?P<NAME>[\w|\-|_]{5,})"
+ACTION =    r"(?P<ACTION>[A-Z]{2,4})"
+NUM =       r"(?P<NUM>[-+]?\d*\.?\d+)"
+WS =        r"(?P<WS>\s+)"
 
 master_pattern = re.compile('|'.join([NAME, ACTION, NUM, WS]))
 Token = namedtuple('Token', ['type', 'value'])
+
 
 def parse_tokens(msg: str):
     scanner = master_pattern.scanner(msg)
@@ -36,17 +42,20 @@ def parse_tokens(msg: str):
         assert val.type in ('NAME', 'NUM')
         yield action.value, val.value
 
+#-------------------------------------------------------
 
-def _new_instance(obj):
-    class _LP(obj.__class__):
+def _new_instance(obj: object) -> object:
+    class _obj(obj.__class__):
         def __init__(self) : 
             for attr, value in vars(obj).copy().items():
                 setattr(self, attr, value)
+
             try:
                 setattr(self, "glp_free", exec_ll("glp_free", self.lpx))
             except AttributeError:
                 pass
-    newcopy = _LP()
+
+    newcopy = _obj()
     newcopy.__class__ = obj.__class__
     return newcopy
 
@@ -66,33 +75,33 @@ class JobHandlerError(Exception):
 
 class LPScanner:
 
-    "Uses Python coroutines to scan multiple LPs simultaneously"
+    "Perform a rapid LP scan"
 
     def __init__(self, reac, flux={}, start=0.1, stop=1.1, step=0.1, rev=False):
-        self.lp_results = {}
-        self.reverse = rev
         self._flux_range = np.arange(start, stop, step)
+        self.reverse = rev
         self.flux = flux
         self.reac = reac
         self.ID = None
         self.notes = None
 
-        self._jobs = deque()
-
         self._actors = {
-            "lp_solve" : self.lp_solve,
-            "get_prim_sol" : self.get_prim_sol,
-            "set_fixed_flux" : self.set_fixed_flux,
-            "transform" : self.transform
+            "lp_solve" :        self.lp_solve,
+            "get_prim_sol" :    self.get_prim_sol,
+            "set_fixed_flux" :  self.set_fixed_flux,
+            "transform" :       self.transform
         }
 
+        self._jobs = deque()
+        self.lp_results = {}
 
-    def send(self, msg: tuple):
+
+    def send(self, msg: Tuple["Actor", "arg", "flux"]) -> None:
         actor = self._actors.get(msg[0])
         self._jobs.append(actor(*msg[1:]))
 
     
-    def normalise_flux(self, i:float):
+    def normalise_flux(self, i: float) -> float:
         i = np.round(i, 2)
         return i if not self.reverse else -i
 
@@ -112,7 +121,10 @@ class LPScanner:
 
     def get_prim_sol(self, lp: object, i: float):
         print(f"Getting primary solution for {i}")
-        sol = lp.GetPrimSol()
+        if lp.IsStatusOptimal():
+            sol = lp.GetPrimSol()
+        else:
+            raise NullOptimalLPError
         yield self.send(("transform", sol, i))
         lp.glp_free()
 
@@ -191,7 +203,7 @@ class JobHandler:
 
     def start(self):
         if self._t and self._t.is_alive():
-            raise ThreadAlreadyRunningError("Cannot start running when JobHandler is still running.")
+            raise ThreadAlreadyRunningError("Cannot start when JobHandler is still running.")
         self._t = Thread(target=self._executor)
         self._t.start()
 
@@ -209,9 +221,17 @@ class JobHandler:
         self._jobs.append((ID, lpscan))
 
 
-    def token_submit(self, msg: str, flux={}):
-        # perhaps introduce a tokenised input?
-        # SCAN [reaction] FROM [min] TO [max] STEP [step]
+    def token_submit(self, msg: str, flux={}) -> None:
+
+        """Send batch jobs to LPScanner as a token:
+
+        INPUT:
+            msg (str): SCAN [reaction] FROM [min] TO [max] STEP [step]
+                       Declaring min, max and step flux are optional, 
+                       defaults are stated in LPScanner.
+            flux (dict): Flux constraints can be declared with flux argument.
+        
+        """
 
         form = {
             "notes" : "String input",
